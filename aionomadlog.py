@@ -152,6 +152,10 @@ class NomadLogger:
         response = await self._session.get(self._allocations_url)
         allocations = await response.json()
 
+        import aiofiles
+        async with aiofiles.open("allocations.json", "w") as aiof:
+            await aiof.write(json.dumps(allocations, indent=4))
+
         tasks = []
         for allocation in allocations:
             for task_name in allocation["TaskStates"].keys():
@@ -212,6 +216,7 @@ class NomadLogger:
                 await self.tasks.update_offset(uuid, offset)
 
             log_data = {
+                "alloc_id": alloc_id,
                 "text": text,
                 "filename": filename,
                 "offset": offset,
@@ -244,7 +249,7 @@ class NomadLogger:
             text_length = len(text)
             filename = log["filename"]
             offset = log["offset"]
-            delimiter = "=" * 20
+            delimiter = "=" * 5
 
             if text_length > self._max_log_length:
                 text = text[-self._max_log_length :]
@@ -254,7 +259,7 @@ class NomadLogger:
                 )
 
             print(
-                f"{color}{delimiter} {filename} @offset {offset} {delimiter}\n"
+                f"{color}{delimiter} {log['alloc_id']} {delimiter} {filename} @offset {offset} {delimiter}\n"
                 f"{text}{color_stop}"
             )
 
