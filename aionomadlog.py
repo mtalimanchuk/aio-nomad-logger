@@ -9,14 +9,13 @@ import base64
 import fnmatch
 import json
 import random
+import sys
 from typing import Dict, List, Union
 from uuid import uuid4
 
 import aiohttp
 import aiosqlite
-
-
-from config import NOMAD_HOST, NOMAD_PORT
+import click
 
 
 class TaskList:
@@ -29,12 +28,12 @@ class TaskList:
         self.db = db
 
     @classmethod
-    async def init(cls, mask: str = "*", db: str = ":memory:") -> TaskList:
+    async def init(cls, mask: str, db: str):
         """The only way to properly instantiate the class
 
         Keyword Arguments:
-            mask {str} -- glob-like task name pattern (default: {"*"})
-            db {str} -- sqlite3-compatible database name (default: {":memory:"})
+            mask {str} -- glob-like task name pattern
+            db {str} -- sqlite3-compatible database name
 
         Returns:
             TaskList -- class instance
@@ -61,7 +60,7 @@ class TaskList:
         """Fully refreshes db and fills with new tasks
 
         Arguments:
-            tasks {list} -- list of task dicts
+            tasks {List[Dict]} -- list of task dicts
         """
 
         await self.db.execute("DELETE FROM task")
@@ -93,9 +92,7 @@ class TaskList:
             offset {Union[str, int]} -- new offset value
         """
 
-        await self.db.execute(
-            "UPDATE task SET offset=? WHERE uuid=?", (offset, uuid)
-        )
+        await self.db.execute("UPDATE task SET offset=? WHERE uuid=?", (offset, uuid))
 
 
 class NomadLogger:
@@ -103,22 +100,22 @@ class NomadLogger:
         self,
         host: str,
         port: int,
-        task_mask: str,
-        db: str = ":memory:",
-        log_delay: Union[int, float] = 1,
-        max_log_length: int = 100000,
+        mask: str,
+        db: str,
+        idle_time: Union[int, float],
+        max_log_length: int,
     ):
         """Async log streamer
 
         Arguments:
             host {str} -- Nomad host
             port {int} -- Nomad port
-            task_mask {str} -- glob-like task name pattern
+            mask {str} -- glob-like task name pattern
 
         Keyword Arguments:
-            db {str} -- [description] (default: {":memory:"})
-            log_delay {Union[int, float]} -- time to idle after finishing a batch (default: {1})
-            max_log_length {int} -- tails log output if it's longer than this value (default: {100000})
+            db {str} -- sqlite database name (default: {":memory:"})
+            idle_time {Union[int, float]} -- time to idle after finishing a batch
+            max_log_length {int} -- tails log output if it's longer than this value
         """
 
         self.host = host
@@ -129,15 +126,15 @@ class NomadLogger:
         self._allocations_url = f"{self._base_url}/allocations"
         self._logs_url = f"{self._base_url}/client/fs/logs"
 
-        self._log_delay = log_delay
+        self._idle_time = idle_time
         self._max_log_length = max_log_length
 
         self._db = db
 
-        self.task_mask = task_mask
+        self.mask = mask
 
     async def __aenter__(self):
-        self.tasks = await TaskList.init(mask=self.task_mask, db=self._db)
+        self.tasks = await TaskList.init(mask=self.mask, db=self._db)
         await self.refresh_sources()
         return self
 
@@ -145,7 +142,7 @@ class NomadLogger:
         await self._session.close()
 
     async def _fetch_tasks(self) -> List[Dict]:
-        """Requests allocations and extracts task matched with glob-like pattern
+        """Requests allocations and extracts tasks matched with glob-like pattern
 
         Returns:
             List[Dict] -- a list of tasks
@@ -159,7 +156,7 @@ class NomadLogger:
         for allocation in allocations:
             for task_name in allocation["TaskStates"].keys():
                 # fnmatch allows matching Unix shell-style wildcards: * ? [seq] [!seq]
-                if fnmatch.fnmatch(name=task_name, pat=self.task_mask):
+                if fnmatch.fnmatch(name=task_name, pat=self.mask):
                     color_code = random.choice(range(8))
                     color = f"\u001b[9{color_code}m"
                     task_uuid = str(uuid4())
@@ -201,7 +198,7 @@ class NomadLogger:
 
         for i, char in enumerate(raw_text[::-1]):
             if char == "{":
-                raw_text = raw_text[-i-1:]
+                raw_text = raw_text[-i - 1 :]
                 break
 
         try:
@@ -237,7 +234,7 @@ class NomadLogger:
         """Prints [arguably] pretty logs
 
         Arguments:
-            log {dict} -- [description]
+            log {dict} -- a dict with text, color, offset, and filename
         """
 
         if log.get("text"):
@@ -250,7 +247,7 @@ class NomadLogger:
             delimiter = "=" * 20
 
             if text_length > self._max_log_length:
-                text = text[-self._max_log_length:]
+                text = text[-self._max_log_length :]
                 text = (
                     f"... Log output truncated because too long ({text_length} chars) ...\n"
                     f"{text}"
@@ -284,22 +281,56 @@ class NomadLogger:
         """Pauses execution to prevent aggressive request spam
         """
 
-        await asyncio.sleep(self._log_delay)
+        await asyncio.sleep(self._idle_time)
 
 
-async def main() -> None:
-    async with NomadLogger(
-        NOMAD_HOST,
-        NOMAD_PORT,
-        "Statistics*",
-        db=":memory:",
-        log_delay=1,
-        max_log_length=1000,
-    ) as logger:
+async def main(host, port, mask, db, idle_time, max_log_length) -> None:
+    async with NomadLogger(host, port, mask, db, idle_time, max_log_length) as logger:
         while True:
             await logger.stream_batch()
             await logger.idle()
 
 
+@click.command()
+@click.argument("mask")
+@click.option("-h", "--host", required=True, help="Nomad host")
+@click.option("-p", "--port", required=True, help="Nomad port")
+@click.option(
+    "--db", default=":memory:", show_default="in-memory db", help="SQLite db path",
+)
+@click.option(
+    "--idle",
+    "--idle-time",
+    "idle_time",
+    default=1,
+    show_default=True,
+    type=click.FLOAT,
+    help="Seconds to idle after each batch",
+)
+@click.option(
+    "--len",
+    "--max-log-length",
+    "max_log_length",
+    default=10000,
+    show_default=True,
+    type=click.INT,
+    help="Max number of latest characters printed by any task",
+)
+def runlogger(host, port, mask, db, idle_time, max_log_length):
+    """MASK\t\tGlob-like mask to filter tasks
+    """
+
+    if not mask or mask == "*":
+        prompt = input(
+            "\n\t* WARNING *\n\n"
+            "It is highly recommended to apply a mask.\n"
+            "Streaming all tasks may lead to VERY poor perfomance.\n"
+            "Proceed anyway?\tY/N\n"
+        )
+        if prompt.lower() not in ("y", "yes"):
+            sys.exit("Exiting. Please, restart providing a mask")
+    asyncio.run(main(host, port, mask, db, idle_time, max_log_length))
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    runlogger()
