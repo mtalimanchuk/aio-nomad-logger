@@ -23,6 +23,16 @@ class TaskList:
     ORM-like object. Must be initiated as 'await TaskList.init(...)'
     """
 
+    FIELDS = {
+        "uuid": "TEXT",
+        "alloc_id": "TEXT",
+        "state": "TEXT",
+        "name": "TEXT",
+        "type": "TEXT",
+        "offset": "TEXT",
+        "color": "TEXT",
+    }
+
     def __init__(self, mask: str, db: str):
         self.mask = mask
         self.db = db
@@ -43,16 +53,8 @@ class TaskList:
         self.db = await aiosqlite.connect(db)
         self.db.row_factory = aiosqlite.Row
 
-        await self.db.execute(
-            "CREATE TABLE IF NOT EXISTS task("
-            "uuid TEXT,"
-            "alloc_id TEXT,"
-            "name TEXT,"
-            "type TEXT,"
-            "offset TEXT,"
-            "color TEXT"
-            ")"
-        )
+        fields_str = ", ".join(f"{k} {v}" for k, v in self.FIELDS.items())
+        await self.db.execute(f"CREATE TABLE IF NOT EXISTS task({fields_str})")
 
         return self
 
@@ -65,12 +67,14 @@ class TaskList:
 
         await self.db.execute("DELETE FROM task")
 
+        task_fields_str = ", ".join(self.FIELDS.keys())
+        values_fields_str = ", ".join(f":{k}" for k in self.FIELDS.keys())
         await self.db.executemany(
-            "INSERT INTO "
-            "task (uuid, alloc_id, name, type, offset, color)"
-            "VALUES (:uuid, :alloc_id, :name, :type, :offset, :color)",
+            "INSERT INTO " f"task ({task_fields_str})" f"VALUES ({values_fields_str})",
             tasks,
         )
+
+        print(tasks)
 
     async def load(self) -> List[aiosqlite.Row]:
         """Loads a list of all tasks
@@ -153,22 +157,26 @@ class NomadLogger:
         allocations = await response.json()
 
         import aiofiles
+
         async with aiofiles.open("allocations.json", "w") as aiof:
             await aiof.write(json.dumps(allocations, indent=4))
 
         tasks = []
         for allocation in allocations:
-            for task_name in allocation["TaskStates"].keys():
+            for task_name, task_data in allocation["TaskStates"].items():
                 # fnmatch allows matching Unix shell-style wildcards: * ? [seq] [!seq]
                 if fnmatch.fnmatch(name=task_name, pat=self.mask):
                     color_code = random.choice(range(8))
                     color = f"\u001b[9{color_code}m"
                     task_uuid = str(uuid4())
+
                     alloc_id = allocation["ID"]
+                    state = task_data["State"]
 
                     task = {
                         "uuid": task_uuid,
                         "alloc_id": alloc_id,
+                        "state": state,
                         "name": task_name,
                         "type": "stderr",
                         "offset": 0,
@@ -179,7 +187,15 @@ class NomadLogger:
         return tasks
 
     async def _fetch_log(
-        self, uuid: str, alloc_id: str, name: str, type: str, offset: str, color: str,
+        self,
+        uuid: str,
+        alloc_id: str,
+        state: str,
+        name: str,
+        type: str,
+        offset: str,
+        color: str,
+        **kwargs,
     ) -> dict:
         """Sends GET request, fixes json response and collects data
         Currently takes only the last chunk of the response to save time
@@ -187,6 +203,7 @@ class NomadLogger:
         Arguments:
             uuid {str} -- task uuid
             alloc_id {str} -- task alloc_id
+            state {str} -- task state
             name {str} -- task name
             type {str} -- task type
             offset {str} -- task offset
@@ -217,6 +234,7 @@ class NomadLogger:
 
             log_data = {
                 "alloc_id": alloc_id,
+                "state": state,
                 "text": text,
                 "filename": filename,
                 "offset": offset,
@@ -245,6 +263,9 @@ class NomadLogger:
         if log.get("text"):
             color = log["color"]
             color_stop = "\u001b[0m"
+
+            alloc_id = log['alloc_id']
+            state = log["state"].upper()
             text = log["text"]
             text_length = len(text)
             filename = log["filename"]
@@ -259,7 +280,7 @@ class NomadLogger:
                 )
 
             print(
-                f"{color}{delimiter} {log['alloc_id']} {delimiter} {filename} @offset {offset} {delimiter}\n"
+                f"{color}{state} {delimiter} {alloc_id} {delimiter} {filename} @offset {offset} {delimiter}\n"
                 f"{text}{color_stop}"
             )
 
