@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 # https://stackoverflow.com/a/37420223
 # a dirty hack to make KeyboardInterrupt work again
 import signal
@@ -59,7 +61,7 @@ class TaskList:
         return self
 
     async def refresh_all(self, tasks: List[Dict]) -> None:
-        """Fully refreshes db and fills with new tasks
+        """Fully refresh db and fill with new tasks
 
         Arguments:
             tasks {List[Dict]} -- list of task dicts
@@ -77,7 +79,7 @@ class TaskList:
         print(tasks)
 
     async def load(self) -> List[aiosqlite.Row]:
-        """Loads a list of all tasks
+        """Load a list of all tasks
 
         Returns:
             List[aiosqlite.Row] -- tasks. Behaves like a List[Dict]
@@ -89,7 +91,7 @@ class TaskList:
         return tasks
 
     async def update_offset(self, uuid: str, offset: Union[str, int]) -> None:
-        """Updates a given task offset to eliminate old logs
+        """Update a given task offset to eliminate old logs
 
         Arguments:
             uuid {str} -- task uuid
@@ -138,15 +140,25 @@ class NomadLogger:
         self.mask = mask
 
     async def __aenter__(self):
+        """Async context manager entry point
+        Because you can't 'await' inside non-async __init__ method
+
+        Returns:
+            class instance
+
+        """
         self.tasks = await TaskList.init(mask=self.mask, db=self._db)
         await self.refresh_sources()
         return self
 
     async def __aexit__(self, *args, **kwargs):
+        """Async context manager exit point
+        Explicitly discard open handlers (just in case)
+        """
         await self._session.close()
 
     async def _fetch_tasks(self) -> List[Dict]:
-        """Requests allocations and extracts tasks matched with glob-like pattern
+        """Request allocations and extract tasks matched with glob-like pattern
 
         Returns:
             List[Dict] -- a list of tasks
@@ -166,7 +178,7 @@ class NomadLogger:
             for task_name, task_data in allocation["TaskStates"].items():
                 # fnmatch allows matching Unix shell-style wildcards: * ? [seq] [!seq]
                 if fnmatch.fnmatch(name=task_name, pat=self.mask):
-                    color_code = random.choice(range(8))
+                    color_code = random.choice(range(1, 8))
                     color = f"\u001b[9{color_code}m"
                     task_uuid = str(uuid4())
 
@@ -197,7 +209,7 @@ class NomadLogger:
         color: str,
         **kwargs,
     ) -> dict:
-        """Sends GET request, fixes json response and collects data
+        """Send GET request, fix json response and collect data
         Currently takes only the last chunk of the response to save time
 
         Arguments:
@@ -247,14 +259,14 @@ class NomadLogger:
         return log_data
 
     async def refresh_sources(self) -> None:
-        """Refreshes allocations, extracts and saves new tasks
+        """Refresh allocations, extract and save new tasks
         """
 
         filtered_tasks = await self._fetch_tasks()
         await self.tasks.refresh_all(filtered_tasks)
 
-    async def print_log(self, log: dict) -> None:
-        """Prints [arguably] pretty logs
+    async def print(self, log: dict) -> None:
+        """Print [arguably] pretty logs
 
         Arguments:
             log {dict} -- a dict with text, color, offset, and filename
@@ -266,11 +278,12 @@ class NomadLogger:
 
             alloc_id = log['alloc_id']
             state = log["state"].upper()
-            text = log["text"]
-            text_length = len(text)
             filename = log["filename"]
             offset = log["offset"]
             delimiter = "=" * 5
+
+            text = log["text"]
+            text_length = len(text)
 
             if text_length > self._max_log_length:
                 text = text[-self._max_log_length :]
@@ -286,8 +299,8 @@ class NomadLogger:
 
     async def stream_batch(self) -> None:
         """The main method of the logger.
-        Loads a list of tasks and runs requests to them asynchronously;
-        Prints the results
+        Load a list of tasks and run requests to them asynchronously;
+        Print the results
 
         """
 
@@ -301,10 +314,10 @@ class NomadLogger:
 
         for completed_task in asyncio.as_completed(aiotasks):
             completed_task_data = await completed_task
-            await self.print_log(completed_task_data)
+            await self.print(completed_task_data)
 
     async def idle(self) -> None:
-        """Pauses execution to prevent aggressive request spam
+        """Pause execution to prevent aggressive request spam
         """
 
         await asyncio.sleep(self._idle_time)
